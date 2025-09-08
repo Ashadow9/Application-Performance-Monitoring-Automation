@@ -121,7 +121,9 @@ This IaC deployment creates the following AWS resources:
 
 ### 1. Confirm Email Subscription
 
-After deployment, you'll receive an email subscription confirmation. Click the confirmation link to receive alerts.
+After Terraform creates the SNS Topic and subscription, you’ll receive an email.
+
+Open your email and click “Confirm subscription” → required to receive alerts.
 
 ### 2. Verify Application Signals
 
@@ -139,11 +141,8 @@ Navigate to the CloudWatch console and find your dashboard named `ApplicationPer
 ### 4. Test Alarm Functionality
 
 ```bash
-# Get the alarm name from outputs
-ALARM_NAME=$(aws cloudformation describe-stacks \
-    --stack-name app-performance-monitoring \
-    --query 'Stacks[0].Outputs[?OutputKey==`HighLatencyAlarmName`].OutputValue' \
-    --output text)
+terraform output HighLatencyAlarmName
+
 
 # Test alarm by setting it to ALARM state
 aws cloudwatch set-alarm-state \
@@ -169,18 +168,14 @@ aws logs describe-log-groups --log-group-name-prefix /aws/lambda/performance-pro
 
 ### Updating Thresholds
 
-To modify alarm thresholds after deployment, update the parameters and redeploy:
+To modify alarm thresholds after deployment, update the parameters and redeploy :
+Update terraform.tfvars
 
+```hcl
+latency_threshold = 3000
+```
 ```bash
-# CloudFormation
-aws cloudformation update-stack \
-    --stack-name app-performance-monitoring \
-    --template-body file://cloudformation.yaml \
-    --parameters ParameterKey=LatencyThreshold,ParameterValue=3000 \
-    --capabilities CAPABILITY_IAM
-
-# Terraform
-terraform apply -var="latency_threshold=3000"
+terraform apply
 ```
 
 ## Troubleshooting
