@@ -1,4 +1,4 @@
-# Application-Performance-Monitoring-Automation
+#  Infrastructure as Code for Application Performance Monitoring Automation
 
 
 ## Architecture Diagram
@@ -63,577 +63,163 @@ graph TB
 ## Preparation
 
 ```bash
-# Set environment variables
-export AWS_REGION=$(aws configure get region)
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
-    --query Account --output text)
+cd terraform/
 
-# Generate unique identifiers for resources
-RANDOM_SUFFIX=$(aws secretsmanager get-random-password \
-    --exclude-punctuation --exclude-uppercase \
-    --password-length 6 --require-each-included-type \
-    --output text --query RandomPassword)
+# Initialize Terraform
+terraform init
 
-# Set resource names
-export MONITORING_STACK_NAME="app-performance-monitoring-${RANDOM_SUFFIX}"
-export SNS_TOPIC_NAME="performance-alerts-${RANDOM_SUFFIX}"
-export LAMBDA_FUNCTION_NAME="performance-processor-${RANDOM_SUFFIX}"
-export EVENTBRIDGE_RULE_NAME="performance-anomaly-rule-${RANDOM_SUFFIX}"
+# Create terraform.tfvars file
+cat > terraform.tfvars << EOF
+aws_region = "us-west-2"
+notification_email = "your-email@example.com"
+application_name = "MyApplication"
+environment = "production"
+EOF
 
-# Create IAM role for Lambda execution
-aws iam create-role \
-    --role-name ${LAMBDA_FUNCTION_NAME}-role \
-    --assume-role-policy-document '{
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Principal": {
-                    "Service": "lambda.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole"
-            }
-        ]
-    }'
+# Review planned changes
+terraform plan
 
-# Attach basic Lambda execution policy
-aws iam attach-role-policy \
-    --role-name ${LAMBDA_FUNCTION_NAME}-role \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+# Deploy infrastructure
+terraform apply
 
-echo "✅ AWS environment configured with resource identifiers"
+# View outputs
+terraform output
+```
+### Terraform Variables
+
+Key variables in `terraform.tfvars`:
+
+```hcl
+aws_region          = "us-west-2"
+notification_email  = "your-email@example.com"
+application_name    = "MyApplication"
+environment         = "production"
+latency_threshold   = 2000
+error_rate_threshold = 5
+throughput_threshold = 10
+
+# Optional tags
+tags = {
+  Environment = "production"
+  Owner       = "platform-team"
+  Project     = "monitoring"
+}
+```
+## Architecture Components
+
+This IaC deployment creates the following AWS resources:
+
+- **CloudWatch Application Signals**: Automatic application instrumentation and metrics collection
+- **CloudWatch Alarms**: Monitor latency, error rates, and throughput thresholds
+- **EventBridge Rules**: Route CloudWatch alarm state changes to processing functions
+- **Lambda Function**: Intelligent event processing and automated remediation
+- **SNS Topic**: Multi-channel notification delivery
+- **CloudWatch Dashboard**: Real-time performance monitoring visualization
+- **IAM Roles and Policies**: Secure permissions following least privilege principle
+
+## Post-Deployment Configuration
+
+### 1. Confirm Email Subscription
+
+After deployment, you'll receive an email subscription confirmation. Click the confirmation link to receive alerts.
+
+### 2. Verify Application Signals
+
+```bash
+# Check if Application Signals is collecting metrics
+aws cloudwatch list-metrics \
+    --namespace AWS/ApplicationSignals \
+    --query 'Metrics[?MetricName==`Latency`]'
 ```
 
-## Steps
+### 3. Access the Dashboard
 
-1. **Enable CloudWatch Application Signals**:
+Navigate to the CloudWatch console and find your dashboard named `ApplicationPerformanceMonitoring-{suffix}` to view real-time metrics.
 
-   CloudWatch Application Signals automatically instruments your applications to collect performance metrics, traces, and service maps without requiring code changes. This service provides unified visibility into application health by capturing key metrics like latency, error rates, and throughput across your distributed services, enabling proactive performance monitoring and rapid troubleshooting of complex architectures.
+### 4. Test Alarm Functionality
 
-   ```bash
-   # Enable Application Signals service
-   aws application-signals put-service-level-objective \
-       --service-level-objective-name "app-performance-slo" \
-       --service-level-objective-configuration '{
-           "MetricType": "Latency",
-           "ComparisonOperator": "LessThanThreshold",
-           "Threshold": 2000,
-           "EvaluationPeriods": 2,
-           "DatapointsToAlarm": 1
-       }'
-   
-   # Create Application Signals log group for data collection
-   aws logs create-log-group \
-       --log-group-name /aws/application-signals/data \
-       --retention-in-days 30
-   
-   # Verify Application Signals is enabled
-   aws application-signals list-service-level-objectives \
-       --query 'ServiceLevelObjectives[0].{Name:Name,MetricType:MetricType}'
-   
-   echo "✅ CloudWatch Application Signals enabled and configured"
-   ```
+```bash
+# Get the alarm name from outputs
+ALARM_NAME=$(aws cloudformation describe-stacks \
+    --stack-name app-performance-monitoring \
+    --query 'Stacks[0].Outputs[?OutputKey==`HighLatencyAlarmName`].OutputValue' \
+    --output text)
 
-   Application Signals is now collecting performance metrics from your applications and providing automated service discovery. This establishes the foundation for comprehensive application performance monitoring with minimal operational overhead and automatic topology mapping.
+# Test alarm by setting it to ALARM state
+aws cloudwatch set-alarm-state \
+    --alarm-name $ALARM_NAME \
+    --state-value ALARM \
+    --state-reason "Manual test of monitoring system"
+```
 
-2. **Create SNS Topic for Notifications**:
+## Monitoring and Maintenance
 
-   Amazon SNS provides reliable, scalable messaging for performance alerts and notifications. Creating a dedicated topic enables multi-channel alerting through email, SMS, and integrations with chat platforms, ensuring critical performance issues reach the right teams immediately regardless of their preferred communication method or location.
+### Health Checks
 
-   ```bash
-   # Create SNS topic for performance alerts
-   aws sns create-topic \
-       --name ${SNS_TOPIC_NAME} \
-       --attributes '{
-           "DisplayName": "Application Performance Alerts",
-           "DeliveryPolicy": "{\"http\":{\"defaultHealthyRetryPolicy\":{\"minDelayTarget\":20,\"maxDelayTarget\":20,\"numRetries\":3,\"numMaxDelayRetries\":0,\"numMinDelayRetries\":0,\"numNoDelayRetries\":0,\"backoffFunction\":\"linear\"},\"disableSubscriptionOverrides\":false}}"
-       }'
-   
-   # Get the topic ARN for use in other steps
-   export SNS_TOPIC_ARN=$(aws sns get-topic-attributes \
-       --topic-arn arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --query 'Attributes.TopicArn' --output text)
-   
-   # Subscribe email endpoint (replace with your actual email)
-   aws sns subscribe \
-       --topic-arn ${SNS_TOPIC_ARN} \
-       --protocol email \
-       --notification-endpoint your-email@example.com
-   
-   echo "✅ SNS topic created: ${SNS_TOPIC_ARN}"
-   ```
+```bash
+# Check EventBridge rule status
+aws events describe-rule --name performance-anomaly-rule-*
 
-   The SNS topic is now configured with delivery policies for reliable message delivery and automatic retry mechanisms. This provides the notification infrastructure needed for immediate alerting when performance anomalies are detected across your application services.
+# Check Lambda function health
+aws lambda get-function --function-name performance-processor-*
 
-3. **Create Lambda Function for Event Processing**:
+# View recent Lambda invocations
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/performance-processor
+```
 
-   AWS Lambda provides serverless compute for processing CloudWatch alarms and implementing automated remediation logic. This function will analyze performance metrics, determine appropriate responses, and trigger scaling actions or notifications based on predefined thresholds and business rules while maintaining cost efficiency through pay-per-invocation pricing.
+### Updating Thresholds
 
-   ```bash
-   # Create Lambda function code
-   cat > lambda_function.py << 'EOF'
-import json
-import boto3
-import logging
-from datetime import datetime
-import os
+To modify alarm thresholds after deployment, update the parameters and redeploy:
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+```bash
+# CloudFormation
+aws cloudformation update-stack \
+    --stack-name app-performance-monitoring \
+    --template-body file://cloudformation.yaml \
+    --parameters ParameterKey=LatencyThreshold,ParameterValue=3000 \
+    --capabilities CAPABILITY_IAM
 
-def lambda_handler(event, context):
-    """
-    Process CloudWatch alarm state changes and trigger appropriate actions
-    """
-    try:
-        # Parse EventBridge event
-        detail = event.get('detail', {})
-        alarm_name = detail.get('alarmName', '')
-        new_state = detail.get('newState', {})
-        state_value = new_state.get('value', '')
-        state_reason = new_state.get('reason', '')
-        
-        logger.info(f"Processing alarm: {alarm_name}, State: {state_value}")
-        
-        # Initialize AWS clients
-        sns_client = boto3.client('sns')
-        cloudwatch_client = boto3.client('cloudwatch')
-        
-        # Get SNS topic ARN from environment
-        sns_topic_arn = os.environ.get('SNS_TOPIC_ARN')
-        
-        # Define response actions based on alarm state
-        if state_value == 'ALARM':
-            # Send immediate notification
-            message = f"""
-🚨 PERFORMANCE ALERT 🚨
+# Terraform
+terraform apply -var="latency_threshold=3000"
+```
 
-Alarm: {alarm_name}
-State: {state_value}
-Reason: {state_reason}
-Time: {datetime.now().isoformat()}
+## Troubleshooting
 
-Automatic scaling has been triggered.
-Monitor dashboard for real-time updates.
-            """
-            
-            sns_client.publish(
-                TopicArn=sns_topic_arn,
-                Message=message,
-                Subject=f"Performance Alert: {alarm_name}"
-            )
-            
-            logger.info("Sent alarm notification and triggered scaling response")
-            
-        elif state_value == 'OK':
-            # Send resolution notification
-            message = f"""
-✅ ALERT RESOLVED ✅
+### Common Issues
 
-Alarm: {alarm_name}
-State: {state_value}
-Time: {datetime.now().isoformat()}
+1. **Application Signals not showing data**:
+   - Ensure your application is properly instrumented
+   - Verify the application is running and receiving traffic
+   - Check that Application Signals is enabled in your AWS region
 
-Performance metrics have returned to normal.
-            """
-            
-            sns_client.publish(
-                TopicArn=sns_topic_arn,
-                Message=message,
-                Subject=f"Alert Resolved: {alarm_name}"
-            )
-            
-            logger.info("Sent resolution notification")
-        
-        return {
-            'statusCode': 200,
-            'body': json.dumps(f'Successfully processed alarm: {alarm_name}')
-        }
-        
-    except Exception as e:
-        logger.error(f"Error processing event: {str(e)}")
-        raise e
-EOF
-   
-   # Create deployment package
-   zip lambda_function.zip lambda_function.py
-   
-   # Create Lambda function
-   aws lambda create-function \
-       --function-name ${LAMBDA_FUNCTION_NAME} \
-       --runtime python3.9 \
-       --role arn:aws:iam::${AWS_ACCOUNT_ID}:role/${LAMBDA_FUNCTION_NAME}-role \
-       --handler lambda_function.lambda_handler \
-       --zip-file fileb://lambda_function.zip \
-       --timeout 60 \
-       --memory-size 256 \
-       --environment Variables='{
-           "SNS_TOPIC_ARN": "'${SNS_TOPIC_ARN}'"
-       }'
-   
-   echo "✅ Lambda function created: ${LAMBDA_FUNCTION_NAME}"
-   ```
+2. **Lambda function not processing events**:
+   - Check EventBridge rule is enabled and properly configured
+   - Verify Lambda function has correct IAM permissions
+   - Review Lambda function logs in CloudWatch Logs
 
-   The Lambda function is now deployed with intelligent event processing capabilities. This serverless function automatically processes CloudWatch alarm state changes and implements appropriate notification and remediation actions based on performance thresholds while maintaining high availability and automatic scaling.
+3. **Notifications not received**:
+   - Confirm email subscription in SNS
+   - Check SNS topic has correct permissions
+   - Verify alarm actions are properly configured
 
-4. **Create CloudWatch Alarms for Application Signals**:
+### Debug Commands
 
-   CloudWatch alarms monitor Application Signals metrics and trigger automated responses when performance thresholds are exceeded. These alarms use statistical analysis to detect anomalies in latency, error rates, and throughput, providing early warning for performance degradation before it impacts users through configurable thresholds and evaluation periods.
+```bash
+# Check Lambda function logs
+aws logs tail /aws/lambda/performance-processor-* --follow
 
-   ```bash
-   # Create alarm for application latency
-   aws cloudwatch put-metric-alarm \
-       --alarm-name "AppSignals-HighLatency-${RANDOM_SUFFIX}" \
-       --alarm-description "Monitor application latency from Application Signals" \
-       --metric-name "Latency" \
-       --namespace "AWS/ApplicationSignals" \
-       --statistic Average \
-       --period 300 \
-       --threshold 2000 \
-       --comparison-operator GreaterThanThreshold \
-       --evaluation-periods 2 \
-       --alarm-actions arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --ok-actions arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --dimensions Name=Service,Value=MyApplication
-   
-   # Create alarm for error rate
-   aws cloudwatch put-metric-alarm \
-       --alarm-name "AppSignals-HighErrorRate-${RANDOM_SUFFIX}" \
-       --alarm-description "Monitor application error rate from Application Signals" \
-       --metric-name "ErrorRate" \
-       --namespace "AWS/ApplicationSignals" \
-       --statistic Average \
-       --period 300 \
-       --threshold 5 \
-       --comparison-operator GreaterThanThreshold \
-       --evaluation-periods 1 \
-       --alarm-actions arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --ok-actions arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --dimensions Name=Service,Value=MyApplication
-   
-   # Create alarm for throughput anomaly
-   aws cloudwatch put-metric-alarm \
-       --alarm-name "AppSignals-LowThroughput-${RANDOM_SUFFIX}" \
-       --alarm-description "Monitor application throughput from Application Signals" \
-       --metric-name "CallCount" \
-       --namespace "AWS/ApplicationSignals" \
-       --statistic Sum \
-       --period 300 \
-       --threshold 10 \
-       --comparison-operator LessThanThreshold \
-       --evaluation-periods 3 \
-       --alarm-actions arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --ok-actions arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SNS_TOPIC_NAME} \
-       --dimensions Name=Service,Value=MyApplication
-   
-   echo "✅ CloudWatch alarms created for Application Signals metrics"
-   ```
+# Verify EventBridge rule targets
+aws events list-targets-by-rule --rule performance-anomaly-rule-*
 
-   The alarms are now actively monitoring your application performance metrics and will trigger automated responses when thresholds are exceeded. This provides proactive monitoring capabilities that detect issues before they impact user experience through configurable sensitivity and evaluation criteria.
-
-5. **Create EventBridge Rules for Alarm Processing**:
-
-   Amazon EventBridge rules provide event-driven automation by routing CloudWatch alarm state changes to appropriate processing functions. These rules enable decoupled, scalable event processing that can trigger multiple downstream actions simultaneously, ensuring comprehensive response to performance anomalies while maintaining system resilience and flexibility.
-
-   ```bash
-   # Create EventBridge rule for CloudWatch alarm state changes
-   aws events put-rule \
-       --name ${EVENTBRIDGE_RULE_NAME} \
-       --description "Route CloudWatch alarm state changes to Lambda processor" \
-       --event-pattern '{
-           "source": ["aws.cloudwatch"],
-           "detail-type": ["CloudWatch Alarm State Change"],
-           "detail": {
-               "state": {
-                   "value": ["ALARM", "OK"]
-               }
-           }
-       }' \
-       --state ENABLED
-   
-   # Add Lambda function as target
-   aws events put-targets \
-       --rule ${EVENTBRIDGE_RULE_NAME} \
-       --targets "Id"="1","Arn"="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${LAMBDA_FUNCTION_NAME}"
-   
-   # Add permission for EventBridge to invoke Lambda
-   aws lambda add-permission \
-       --function-name ${LAMBDA_FUNCTION_NAME} \
-       --statement-id allow-eventbridge-invoke \
-       --action lambda:InvokeFunction \
-       --principal events.amazonaws.com \
-       --source-arn arn:aws:events:${AWS_REGION}:${AWS_ACCOUNT_ID}:rule/${EVENTBRIDGE_RULE_NAME}
-   
-   echo "✅ EventBridge rule created: ${EVENTBRIDGE_RULE_NAME}"
-   ```
-
-   EventBridge is now configured to automatically route CloudWatch alarm state changes to the Lambda function for processing. This event-driven architecture ensures immediate response to performance anomalies while maintaining system resilience and enabling easy integration with additional downstream services.
-
-6. **Create CloudWatch Dashboard for Monitoring**:
-
-   CloudWatch dashboards provide centralized visualization of application performance metrics and system health. Creating a comprehensive dashboard enables real-time monitoring, trend analysis, and quick identification of performance patterns across your distributed application architecture while supporting operational teams with actionable insights.
-
-   ```bash
-   # Create CloudWatch dashboard
-   aws cloudwatch put-dashboard \
-       --dashboard-name "ApplicationPerformanceMonitoring-${RANDOM_SUFFIX}" \
-       --dashboard-body '{
-           "widgets": [
-               {
-                   "type": "metric",
-                   "x": 0,
-                   "y": 0,
-                   "width": 12,
-                   "height": 6,
-                   "properties": {
-                       "metrics": [
-                           ["AWS/ApplicationSignals", "Latency", "Service", "MyApplication"],
-                           [".", "ErrorRate", ".", "."],
-                           [".", "CallCount", ".", "."]
-                       ],
-                       "view": "timeSeries",
-                       "stacked": false,
-                       "region": "'${AWS_REGION}'",
-                       "title": "Application Performance Metrics",
-                       "period": 300,
-                       "stat": "Average",
-                       "yAxis": {
-                           "left": {
-                               "min": 0
-                           }
-                       }
-                   }
-               },
-               {
-                   "type": "metric",
-                   "x": 12,
-                   "y": 0,
-                   "width": 12,
-                   "height": 6,
-                   "properties": {
-                       "metrics": [
-                           ["AWS/Events", "InvocationsCount", "RuleName", "'${EVENTBRIDGE_RULE_NAME}'"],
-                           ["AWS/Lambda", "Invocations", "FunctionName", "'${LAMBDA_FUNCTION_NAME}'"]
-                       ],
-                       "view": "timeSeries",
-                       "stacked": false,
-                       "region": "'${AWS_REGION}'",
-                       "title": "Event Processing Metrics",
-                       "period": 300,
-                       "stat": "Sum"
-                   }
-               }
-           ]
-       }'
-   
-   echo "✅ CloudWatch dashboard created for performance monitoring"
-   ```
-
-   The dashboard provides real-time visibility into application performance metrics and event processing statistics. This centralized monitoring interface enables quick identification of performance trends and system health status while supporting operational teams with comprehensive insights.
-
-7. **Configure Additional IAM Permissions**:
-
-   Proper IAM permissions ensure the Lambda function can interact with AWS services while maintaining security best practices. These permissions enable automated scaling actions, CloudWatch metric access, and SNS notifications while following the principle of least privilege to minimize security exposure and maintain compliance requirements.
-
-   ```bash
-   # Create additional IAM policy for Lambda function
-   aws iam create-policy \
-       --policy-name ${LAMBDA_FUNCTION_NAME}-policy \
-       --policy-document '{
-           "Version": "2012-10-17",
-           "Statement": [
-               {
-                   "Effect": "Allow",
-                   "Action": [
-                       "sns:Publish",
-                       "cloudwatch:DescribeAlarms",
-                       "cloudwatch:GetMetricStatistics",
-                       "autoscaling:DescribeAutoScalingGroups",
-                       "autoscaling:UpdateAutoScalingGroup"
-                   ],
-                   "Resource": "*"
-               }
-           ]
-       }'
-   
-   # Attach policy to Lambda role
-   aws iam attach-role-policy \
-       --role-name ${LAMBDA_FUNCTION_NAME}-role \
-       --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${LAMBDA_FUNCTION_NAME}-policy
-   
-   echo "✅ IAM permissions configured for automated monitoring system"
-   ```
-
-   The Lambda function now has appropriate permissions to perform automated monitoring and remediation actions. This completes the security configuration while enabling the function to interact with necessary AWS services according to least privilege principles.
-
-8. **Test the Monitoring System**:
-
-   Testing validates that the monitoring system correctly detects performance anomalies and triggers appropriate responses. This verification ensures that alarm thresholds are properly configured and that the event-driven architecture functions as expected under various scenarios, providing confidence in the system's reliability.
-
-   ```bash
-   # Test alarm state by manually setting alarm state
-   aws cloudwatch set-alarm-state \
-       --alarm-name "AppSignals-HighLatency-${RANDOM_SUFFIX}" \
-       --state-value ALARM \
-       --state-reason "Manual test of monitoring system"
-   
-   # Wait for processing to complete
-   sleep 15
-   
-   # Check Lambda function logs for processing confirmation
-   aws logs describe-log-groups \
-       --log-group-name-prefix /aws/lambda/${LAMBDA_FUNCTION_NAME} \
-       --query 'logGroups[0].logGroupName' --output text
-   
-   # Reset alarm state to OK
-   aws cloudwatch set-alarm-state \
-       --alarm-name "AppSignals-HighLatency-${RANDOM_SUFFIX}" \
-       --state-value OK \
-       --state-reason "Manual test completion"
-   
-   echo "✅ Monitoring system tested successfully"
-   ```
-
-   The test confirms that the monitoring system properly processes alarm state changes and triggers notifications. This validation ensures the system is ready for production monitoring of your application performance with automated response capabilities.
-
-## Validation & Testing
-
-1. **Verify CloudWatch Application Signals is collecting metrics**:
-
-   ```bash
-   # Check Application Signals metrics availability
-   aws cloudwatch list-metrics \
-       --namespace AWS/ApplicationSignals \
-       --query 'Metrics[?MetricName==`Latency`]'
-   ```
-
-   Expected output: JSON array with Application Signals metrics for your application services showing metric names and dimensions.
-
-2. **Test alarm functionality**:
-
-   ```bash
-   # List created alarms and their configuration
-   aws cloudwatch describe-alarms \
-       --alarm-names "AppSignals-HighLatency-${RANDOM_SUFFIX}" \
-       --query 'MetricAlarms[0].{Name:AlarmName,State:StateValue,Actions:AlarmActions}'
-   ```
-
-   Expected output: Alarm configuration showing INSUFFICIENT_DATA or OK state with SNS actions properly configured.
-
-3. **Verify EventBridge rule is active**:
-
-   ```bash
-   # Check EventBridge rule status and configuration
-   aws events describe-rule \
-       --name ${EVENTBRIDGE_RULE_NAME} \
-       --query '{Name:Name,State:State,EventPattern:EventPattern}'
-   ```
-
-   Expected output: Rule configuration showing ENABLED state with CloudWatch event pattern for alarm state changes.
-
-4. **Test Lambda function invocation**:
-
-   ```bash
-   # Check Lambda function status and recent activity
-   aws lambda get-function \
-       --function-name ${LAMBDA_FUNCTION_NAME} \
-       --query 'Configuration.{FunctionName:FunctionName,LastModified:LastModified,State:State}'
-   ```
-
-   Expected output: Function configuration showing Active state and recent modification timestamp.
-
-5. **Verify dashboard creation**:
-
-   ```bash
-   # List CloudWatch dashboards
-   aws cloudwatch list-dashboards \
-       --query 'DashboardEntries[?contains(DashboardName, `ApplicationPerformanceMonitoring`)]'
-   ```
-
-   Expected output: Dashboard entry showing the created performance monitoring dashboard with proper naming.
+# Check alarm history
+aws cloudwatch describe-alarm-history --alarm-name AppSignals-HighLatency-*
+```
 
 ## Cleanup
+```bash
+cd terraform/
+terraform destroy
+```
 
-1. **Delete CloudWatch dashboard**:
-
-   ```bash
-   # Delete CloudWatch dashboard
-   aws cloudwatch delete-dashboards \
-       --dashboard-names "ApplicationPerformanceMonitoring-${RANDOM_SUFFIX}"
-   
-   echo "✅ CloudWatch dashboard deleted"
-   ```
-
-2. **Remove EventBridge rule and targets**:
-
-   ```bash
-   # Remove targets from EventBridge rule
-   aws events remove-targets \
-       --rule ${EVENTBRIDGE_RULE_NAME} \
-       --ids "1"
-   
-   # Delete EventBridge rule
-   aws events delete-rule \
-       --name ${EVENTBRIDGE_RULE_NAME}
-   
-   echo "✅ EventBridge rule and targets deleted"
-   ```
-
-3. **Delete CloudWatch alarms**:
-
-   ```bash
-   # Delete all CloudWatch alarms
-   aws cloudwatch delete-alarms \
-       --alarm-names "AppSignals-HighLatency-${RANDOM_SUFFIX}" \
-       "AppSignals-HighErrorRate-${RANDOM_SUFFIX}" \
-       "AppSignals-LowThroughput-${RANDOM_SUFFIX}"
-   
-   echo "✅ CloudWatch alarms deleted"
-   ```
-
-4. **Delete Lambda function**:
-
-   ```bash
-   # Delete Lambda function
-   aws lambda delete-function \
-       --function-name ${LAMBDA_FUNCTION_NAME}
-   
-   # Remove local deployment files
-   rm -f lambda_function.zip lambda_function.py
-   
-   echo "✅ Lambda function and local files deleted"
-   ```
-
-5. **Delete SNS topic**:
-
-   ```bash
-   # Delete SNS topic and all subscriptions
-   aws sns delete-topic \
-       --topic-arn ${SNS_TOPIC_ARN}
-   
-   echo "✅ SNS topic and subscriptions deleted"
-   ```
-
-6. **Remove IAM roles and policies**:
-
-   ```bash
-   # Detach policies from IAM role
-   aws iam detach-role-policy \
-       --role-name ${LAMBDA_FUNCTION_NAME}-role \
-       --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-   
-   aws iam detach-role-policy \
-       --role-name ${LAMBDA_FUNCTION_NAME}-role \
-       --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${LAMBDA_FUNCTION_NAME}-policy
-   
-   # Delete custom IAM policy
-   aws iam delete-policy \
-       --policy-arn arn:aws:iam::${AWS_ACCOUNT_ID}:policy/${LAMBDA_FUNCTION_NAME}-policy
-   
-   # Delete IAM role
-   aws iam delete-role \
-       --role-name ${LAMBDA_FUNCTION_NAME}-role
-   
-   echo "✅ IAM roles and policies deleted"
    ```
 
